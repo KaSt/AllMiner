@@ -232,11 +232,6 @@ int scanhash_scrypt_jane(int thr_id, uint32_t *pdata,
 	int throughput = scrypt_best_throughput();
 	int i;
 
-        for(int z=0;z<20;z++) {
-            //be32enc(data+z, pdata[z]);
-            //be32enc(target_swap+z, ptarget[z]);
-        }
-
         /* byte swap it */
         for(int z=0;z<20;z++) {
             datac[(z*4)  ] = pdatac[(z*4)+3];
@@ -266,9 +261,6 @@ int scanhash_scrypt_jane(int thr_id, uint32_t *pdata,
 */
                     if(fulltest(hash, ptarget)) {
 			*hashes_done = n - pdata[19] + 1;
-			//be32enc(pdata+19, data[19]);
-
-
 			pdatac[76] = datac[79];
                         pdatac[77] = datac[78];
                         pdatac[78] = datac[77];

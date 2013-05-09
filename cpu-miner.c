@@ -89,11 +89,13 @@ struct workio_cmd {
 
 enum sha256_algos {
 	ALGO_SCRYPT,		/* scrypt(1024,1,1) */
+	ALGO_SCRYPT_JANE,		/* scrypt-jane with n-factor */
 	ALGO_SHA256D,		/* SHA-256d */
 };
 
 static const char *algo_names[] = {
 	[ALGO_SCRYPT]		= "scrypt",
+	[ALGO_SCRYPT_JANE]	= "scrypt-jane",
 	[ALGO_SHA256D]		= "sha256d",
 };
 
@@ -146,8 +148,9 @@ static char const usage[] = "\
 Usage: " PROGRAM_NAME " [OPTIONS]\n\
 Options:\n\
   -a, --algo=ALGO       specify the algorithm to use\n\
-                          scrypt    scrypt(1024, 1, 1) (default)\n\
-                          sha256d   SHA-256d\n\
+                          scrypt       scrypt(1024, 1, 1) (default)\n\
+                          scrypt-jane  scrypt-jane\n\
+                          sha256d      SHA-256d\n\
   -o, --url=URL         URL of mining server (default: " DEF_RPC_URL ")\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
@@ -613,7 +616,7 @@ static void *miner_thread(void *userdata)
 		      - time(NULL);
 		max64 *= thr_hashrates[thr_id];
 		if (max64 <= 0)
-			max64 = opt_algo == ALGO_SCRYPT ? 0xfffLL : 0x1fffffLL;
+			max64 = (opt_algo == ALGO_SCRYPT||opt_algo == ALGO_SCRYPT_JANE) ? 0xfffLL : 0x1fffffLL;
 		if (work.data[19] + max64 > end_nonce)
 			max_nonce = end_nonce;
 		else
@@ -626,6 +629,11 @@ static void *miner_thread(void *userdata)
 		switch (opt_algo) {
 		case ALGO_SCRYPT:
 			rc = scanhash_scrypt(thr_id, work.data, scratchbuf, work.target,
+			                     max_nonce, &hashes_done);
+			break;
+
+		case ALGO_SCRYPT_JANE:
+			rc = scanhash_scrypt_jane(thr_id, work.data, work.target,
 			                     max_nonce, &hashes_done);
 			break;
 

@@ -229,7 +229,6 @@ int scanhash_scrypt_jane(int thr_id, uint32_t *pdata,
         volatile unsigned char *datac = (unsigned char *) data;
         volatile unsigned char *pdatac = (unsigned char *) pdata;
 	uint32_t n = pdata[19] - 1;
-	int throughput = scrypt_best_throughput();
 	int i;
 
         /* byte swap it */

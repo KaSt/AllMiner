@@ -7,7 +7,7 @@
  * any later version.  See COPYING for more details.
  */
 
-#include "cpuminer-config.h"
+#include "allminer-config.h"
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -34,10 +34,12 @@
 #endif
 #include <jansson.h>
 #include <curl/curl.h>
+#include <openssl/sha.h>
 #include "compat.h"
 #include "miner.h"
 
-#define PROGRAM_NAME		"minerd"
+
+#define PROGRAM_NAME		"allminer"
 #define DEF_RPC_URL		"http://127.0.0.1:9332/"
 #define LP_SCANTIME		60
 
@@ -71,6 +73,11 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+	cpu_set_t set;
+
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	sched_setaffinity(0, sizeof(&set), &set);
 }
 #endif
 		
@@ -91,19 +98,26 @@ enum sha256_algos {
 	ALGO_SCRYPT,		/* scrypt(1024,1,1) */
 	ALGO_SCRYPT_JANE,		/* scrypt-jane with n-factor */
 	ALGO_SHA256D,		/* SHA-256d */
+	ALGO_QUARK,             /* QUARKCOIN algo */
+	ALGO_KECCAK,		/* KECCAK algo */
 };
 
 static const char *algo_names[] = {
 	[ALGO_SCRYPT]		= "scrypt",
 	[ALGO_SCRYPT_JANE]	= "scrypt-jane",
 	[ALGO_SHA256D]		= "sha256d",
+	[ALGO_QUARK]		= "quark",
+	[ALGO_KECCAK]		= "keccak",
 };
 
 bool opt_debug = false;
+bool opt_hashdebug = false;
 bool opt_protocol = false;
 static bool opt_benchmark = false;
 bool want_longpoll = true;
 bool have_longpoll = false;
+bool want_stratum = true;
+bool have_stratum = false;
 static bool submit_old = false;
 bool use_syslog = false;
 static bool opt_background = false;
@@ -120,19 +134,23 @@ static int num_processors;
 static char *rpc_url;
 static char *rpc_userpass;
 static char *rpc_user, *rpc_pass;
+char *opt_cert;
 char *opt_proxy;
 long opt_proxy_type;
 struct thr_info *thr_info;
 static int work_thr_id;
 int longpoll_thr_id;
+int stratum_thr_id = -1;
 struct work_restart *work_restart = NULL;
 pthread_mutex_t applog_lock;
 pthread_mutex_t stats_lock;
 
+static struct stratum_ctx stratum;
+
 static unsigned long accepted_count = 0L;
 static unsigned long rejected_count = 0L;
 double *thr_hashrates;
-
+static struct stratum_ctx stratum;
 #ifdef HAVE_GETOPT_LONG
 #include <getopt.h>
 #else
@@ -151,6 +169,8 @@ Options:\n\
                           scrypt       scrypt(1024, 1, 1) (default)\n\
                           scrypt-jane  scrypt-jane\n\
                           sha256d      SHA-256d\n\
+			  quark     Quarkcoin\n\
+			  keccak    Keccak SHA3 (MaxCoin)\n\
   -o, --url=URL         URL of mining server (default: " DEF_RPC_URL ")\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
@@ -166,6 +186,7 @@ Options:\n\
       --no-longpoll     disable X-Long-Polling support\n\
   -q, --quiet           disable per-thread hashmeter output\n\
   -D, --debug           enable debug output\n\
+  -H, --hashdebug       enable hash debug output\n\
   -P, --protocol-dump   verbose dump of protocol-level activities\n"
 #ifdef HAVE_SYSLOG_H
 "\
@@ -189,7 +210,7 @@ static char const short_options[] =
 #ifdef HAVE_SYSLOG_H
 	"S"
 #endif
-	"a:c:Dhp:Px:qr:R:s:t:T:o:u:O:V";
+	"a:c:DHhp:Px:qr:R:s:t:T:o:u:O:V";
 
 static struct option const options[] = {
 	{ "algo", 1, NULL, 'a' },
@@ -199,6 +220,7 @@ static struct option const options[] = {
 	{ "benchmark", 0, NULL, 1005 },
 	{ "config", 1, NULL, 'c' },
 	{ "debug", 0, NULL, 'D' },
+	{ "hashdebug", 0, NULL, 'H' },
 	{ "help", 0, NULL, 'h' },
 	{ "no-longpoll", 0, NULL, 1003 },
 	{ "pass", 1, NULL, 'p' },
@@ -223,6 +245,10 @@ static struct option const options[] = {
 struct work {
 	uint32_t data[32];
 	uint32_t target[8];
+	
+	char job_id[128];
+	size_t xnonce2_len;
+	unsigned char xnonce2[32];
 };
 
 static struct work g_work;
@@ -275,6 +301,31 @@ err_out:
 	return false;
 }
 
+static void share_result(int result, const char *reason)
+{
+	char s[345];
+	double hashrate;
+	int i;
+
+	hashrate = 0.;
+	pthread_mutex_lock(&stats_lock);
+	for (i = 0; i < opt_n_threads; i++)
+		hashrate += thr_hashrates[i];
+	result ? accepted_count++ : rejected_count++;
+	pthread_mutex_unlock(&stats_lock);
+
+	sprintf(s, hashrate >= 1e6 ? "%.0f" : "%.2f", 1e-3 * hashrate);
+	applog(LOG_INFO, "accepted: %lu/%lu (%.2f%%), %s khash/s %s",
+		   accepted_count,
+		   accepted_count + rejected_count,
+		   100. * accepted_count / (accepted_count + rejected_count),
+		   s,
+		   result ? "(yay!!!)" : "(booooo)");
+
+	if ((opt_debug || opt_hashdebug) && reason)
+		applog(LOG_DEBUG, "DEBUG: reject reason: %s", reason);
+}
+
 static bool submit_upstream_work(CURL *curl, struct work *work)
 {
 	char *hexstr = NULL;
@@ -286,8 +337,22 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 
 	/* pass if the previous hash is not the current previous hash */
 	if (!submit_old && memcmp(work->data + 1, g_work.data + 1, 32)) {
-		if (opt_debug)
+		if (opt_debug || opt_hashdebug)
+		{
 			applog(LOG_DEBUG, "DEBUG: stale work detected, discarding");
+			int ii=0;
+			for (ii=0; ii < 32; ii++)
+			{
+				printf ("%.2x",((uint8_t*)(work->data + 1))[ii]);
+			};
+			printf ("\n");
+			for (ii=0; ii < 32; ii++)
+			{
+				printf ("%.2x",((uint8_t*)(g_work.data + 1))[ii]);
+			};
+			printf ("\n");
+			
+		}
 		return true;
 	}
 
@@ -329,7 +394,7 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	       s,
 	       json_is_true(res) ? "(yay!!!)" : "(booooo)");
 
-	if (opt_debug) {
+	if (opt_debug || opt_hashdebug) {
 		json_t *tmp;
 		const char *reason;
 		tmp = json_object_get(val, "reject-reason");
@@ -556,6 +621,57 @@ err_out:
 	return false;
 }
 
+static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
+{
+	unsigned char merkle_root[64];
+	int i;
+
+	pthread_mutex_lock(&sctx->work_lock);
+
+	strcpy(work->job_id, sctx->job.job_id);
+	work->xnonce2_len = sctx->xnonce2_size;
+	memcpy(work->xnonce2, sctx->job.xnonce2, sctx->xnonce2_size);
+
+	/* Generate merkle root */
+	SHA256((unsigned char*)sctx->job.coinbase, sctx->job.coinbase_size, (unsigned char*)merkle_root);
+	for (i = 0; i < sctx->job.merkle_count; i++) {
+		memcpy(merkle_root + 32, sctx->job.merkle[i], 32);
+		sha256d_stratum(merkle_root, merkle_root, 64);
+	}
+
+	/* Increment extranonce2 */
+	for (i = 0; i < sctx->xnonce2_size && !++sctx->job.xnonce2[i]; i++);
+
+	/* Assemble block header */
+	memset(work->data, 0, 128);
+	work->data[0] = le32dec(sctx->job.version);
+	for (i = 0; i < 8; i++)
+		work->data[1 + i] = le32dec((uint32_t *)sctx->job.prevhash + i);
+	for (i = 0; i < 8; i++)
+		work->data[9 + i] = be32dec((uint32_t *)merkle_root + i);
+	work->data[17] = le32dec(sctx->job.ntime);
+	work->data[18] = le32dec(sctx->job.nbits);
+	work->data[20] = 0x80000000;
+	work->data[31] = 0x00000280;
+
+	pthread_mutex_unlock(&sctx->work_lock);
+
+	if (opt_debug) {
+		char *xnonce2str = bin2hex(work->xnonce2, sctx->xnonce2_size);
+		applog(LOG_DEBUG, "DEBUG: job_id='%s' extranonce2=%s ntime=%08x",
+		       work->job_id, xnonce2str, swab32(work->data[17]));
+		free(xnonce2str);
+	}
+
+	if (opt_algo == ALGO_SCRYPT)
+		diff_to_target(work->target, sctx->job.diff / 65536.0);
+        else if (opt_algo == ALGO_KECCAK)
+		diff_to_target(work->target, sctx->job.diff / 256.0);
+	else
+		diff_to_target(work->target, sctx->job.diff);
+}
+
+
 static void *miner_thread(void *userdata)
 {
 	struct thr_info *mythr = userdata;
@@ -591,18 +707,32 @@ static void *miner_thread(void *userdata)
 		int64_t max64;
 		int rc;
 
-		/* obtain new work from internal workio thread */
-		pthread_mutex_lock(&g_work_lock);
-		if (!have_longpoll || time(NULL) >= g_work_time + LP_SCANTIME*3/4
-			|| work.data[19] >= end_nonce) {
-			if (unlikely(!get_work(mythr, &g_work))) {
-				applog(LOG_ERR, "work retrieval failed, exiting "
-					"mining thread %d", mythr->id);
-				pthread_mutex_unlock(&g_work_lock);
-				goto out;
+		if (have_stratum) {
+			while (!*g_work.job_id || time(NULL) >= g_work_time + 120)
+				sleep(1);
+			pthread_mutex_lock(&g_work_lock);
+			if (work.data[19] >= end_nonce)
+	    			stratum_gen_work(&stratum, &g_work);
+		} else {
+			/* obtain new work from internal workio thread */
+			pthread_mutex_lock(&g_work_lock);
+			if (!have_longpoll || time(NULL) >= g_work_time + LP_SCANTIME*3/4
+				|| work.data[19] >= end_nonce) {
+				if (unlikely(!get_work(mythr, &g_work))) {
+					applog(LOG_ERR, "work retrieval failed, exiting "
+						"mining thread %d", mythr->id);
+					pthread_mutex_unlock(&g_work_lock);
+					goto out;
+				}
+				time(&g_work_time);
 			}
-			time(&g_work_time);
+			if (have_stratum) {
+				pthread_mutex_unlock(&g_work_lock);
+				continue;
+			}
+			
 		}
+		
 		if (memcmp(work.data, g_work.data, 76)) {
 			memcpy(&work, &g_work, sizeof(struct work));
 			work.data[19] = 0xffffffffU / opt_n_threads * thr_id;
@@ -612,8 +742,11 @@ static void *miner_thread(void *userdata)
 		work_restart[thr_id].restart = 0;
 		
 		/* adjust max_nonce to meet target scan time */
-		max64 = g_work_time + (have_longpoll ? LP_SCANTIME : opt_scantime)
-		      - time(NULL);
+		if (have_stratum)
+			max64 = LP_SCANTIME;
+		else
+			max64 = g_work_time + (have_longpoll ? LP_SCANTIME : opt_scantime)
+		      		- time(NULL);
 		max64 *= thr_hashrates[thr_id];
 		if (max64 <= 0)
 			max64 = (opt_algo == ALGO_SCRYPT||opt_algo == ALGO_SCRYPT_JANE) ? 0xfffLL : 0x1fffffLL;
@@ -641,7 +774,14 @@ static void *miner_thread(void *userdata)
 			rc = scanhash_sha256d(thr_id, work.data, work.target,
 			                      max_nonce, &hashes_done);
 			break;
-
+		case ALGO_QUARK:
+			rc = scanhash_quark(thr_id, work.data, work.target,
+			                      max_nonce, &hashes_done);
+			break;
+		case ALGO_KECCAK:
+			rc = scanhash_keccak(thr_id, work.data, work.target,
+			max_nonce, &hashes_done);
+			break;
 		default:
 			/* should never happen */
 			goto out;
@@ -777,6 +917,100 @@ out:
 	return NULL;
 }
 
+static bool stratum_handle_response(char *buf)
+{
+	json_t *val, *err_val, *res_val, *id_val;
+	json_error_t err;
+	bool ret = false;
+
+	val = JSON_LOADS(buf, &err);
+	if (!val) {
+		applog(LOG_INFO, "JSON decode failed(%d): %s", err.line, err.text);
+		goto out;
+	}
+
+	res_val = json_object_get(val, "result");
+	err_val = json_object_get(val, "error");
+	id_val = json_object_get(val, "id");
+
+	if (!id_val || json_is_null(id_val) || !res_val)
+		goto out;
+
+	share_result(json_is_true(res_val),
+		err_val ? json_string_value(json_array_get(err_val, 1)) : NULL);
+
+	ret = true;
+out:
+	if (val)
+		json_decref(val);
+
+	return ret;
+}
+
+static void *stratum_thread(void *userdata)
+{
+	struct thr_info *mythr = userdata;
+	char *s;
+
+	stratum.url = tq_pop(mythr->q, NULL);
+	if (!stratum.url)
+		goto out;
+	applog(LOG_INFO, "Starting Stratum on %s", stratum.url);
+
+	while (1) {
+		int failures = 0;
+
+		while (!stratum.curl) {
+			pthread_mutex_lock(&g_work_lock);
+			g_work_time = 0;
+			pthread_mutex_unlock(&g_work_lock);
+			restart_threads();
+
+			if (!stratum_connect(&stratum, stratum.url) ||
+			    !stratum_subscribe(&stratum) ||
+			    !stratum_authorize(&stratum, rpc_user, rpc_pass)) {
+				stratum_disconnect(&stratum);
+				if (opt_retries >= 0 && ++failures > opt_retries) {
+					applog(LOG_ERR, "...terminating workio thread");
+					tq_push(thr_info[work_thr_id].q, NULL);
+					goto out;
+				}
+				applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
+				sleep(opt_fail_pause);
+			}
+		}
+
+		if (stratum.job.job_id &&
+		    (strcmp(stratum.job.job_id, g_work.job_id) || !g_work_time)) {
+			pthread_mutex_lock(&g_work_lock);
+			stratum_gen_work(&stratum, &g_work);
+			time(&g_work_time);
+			pthread_mutex_unlock(&g_work_lock);
+			if (stratum.job.clean) {
+				applog(LOG_INFO, "Stratum detected new block");
+				restart_threads();
+			}
+		}
+
+		if (!stratum_socket_full(&stratum, 120)) {
+			applog(LOG_ERR, "Stratum connection timed out");
+			s = NULL;
+		} else
+			s = stratum_recv_line(&stratum);
+		if (!s) {
+			stratum_disconnect(&stratum);
+			applog(LOG_ERR, "Stratum connection interrupted");
+			continue;
+		}
+		if (!stratum_handle_method(&stratum, s))
+			stratum_handle_response(s);
+		free(s);
+	}
+
+out:
+	return NULL;
+}
+
 static void show_version_and_exit(void)
 {
 	printf("%s\n%s\n", PACKAGE_STRING, curl_version());
@@ -833,6 +1067,9 @@ static void parse_arg (int key, char *arg)
 	case 'D':
 		opt_debug = true;
 		break;
+	case 'H':
+		opt_hashdebug = true;
+		break;
 	case 'p':
 		free(rpc_pass);
 		rpc_pass = strdup(arg);
@@ -877,7 +1114,8 @@ static void parse_arg (int key, char *arg)
 	case 'o':			/* --url */
 		p = strstr(arg, "://");
 		if (p) {
-			if (strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8))
+			if (strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8) &&
+					strncasecmp(arg, "stratum+tcp://", 14))
 				show_usage_and_exit(1);
 			free(rpc_url);
 			rpc_url = strdup(arg);
@@ -901,6 +1139,7 @@ static void parse_arg (int key, char *arg)
 			}
 			memmove(ap, p + 1, (strlen(p + 1) + 1) * sizeof(char));
 		}
+		have_stratum = !opt_benchmark && !strncasecmp(rpc_url, "stratum", 7);
 		break;
 	case 'O':			/* --userpass */
 		if (!strchr(arg, ':'))
@@ -1019,12 +1258,17 @@ void signal_handler(int sig)
 int main(int argc, char *argv[])
 {
 	struct thr_info *thr;
+	long flags;
 	int i;
 
 	rpc_url = strdup(DEF_RPC_URL);
 
 	/* parse command line */
 	parse_cmdline(argc, argv);
+
+	if (opt_algo==ALGO_QUARK) {
+		init_quarkhash_contexts();
+	}
 
 #ifndef WIN32
 	if (opt_background) {
@@ -1046,6 +1290,18 @@ int main(int argc, char *argv[])
 	pthread_mutex_init(&applog_lock, NULL);
 	pthread_mutex_init(&stats_lock, NULL);
 	pthread_mutex_init(&g_work_lock, NULL);
+
+	pthread_mutex_init(&stratum.sock_lock, NULL);
+	pthread_mutex_init(&stratum.work_lock, NULL);
+
+	flags = strncmp(rpc_url, "https:", 6)
+	      ? (CURL_GLOBAL_ALL & ~CURL_GLOBAL_SSL)
+	      : CURL_GLOBAL_ALL;
+	if (curl_global_init(flags)) {
+		applog(LOG_ERR, "CURL initialization failed");
+		return 1;
+	}
+	
 
 #if defined(WIN32)
 	SYSTEM_INFO sysinfo;
@@ -1078,7 +1334,7 @@ int main(int argc, char *argv[])
 
 #ifdef HAVE_SYSLOG_H
 	if (use_syslog)
-		openlog("cpuminer", LOG_PID, LOG_USER);
+		openlog("allminer", LOG_PID, LOG_USER);
 #endif
 
 	work_restart = calloc(opt_n_threads, sizeof(*work_restart));
@@ -1108,7 +1364,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* init longpoll thread info */
-	if (want_longpoll) {
+	if (want_longpoll && !have_stratum) {
 		longpoll_thr_id = opt_n_threads + 1;
 		thr = &thr_info[longpoll_thr_id];
 		thr->id = longpoll_thr_id;
@@ -1121,8 +1377,27 @@ int main(int argc, char *argv[])
 			applog(LOG_ERR, "longpoll thread create failed");
 			return 1;
 		}
-	} else
-		longpoll_thr_id = -1;
+	} 
+
+	if (want_stratum) {
+		/* init stratum thread info */
+		stratum_thr_id = opt_n_threads + 2;
+		thr = &thr_info[stratum_thr_id];
+		thr->id = stratum_thr_id;
+		thr->q = tq_new();
+		if (!thr->q)
+			return 1;
+
+		/* start stratum thread */
+		if (unlikely(pthread_create(&thr->pth, NULL, stratum_thread, thr))) {
+			applog(LOG_ERR, "stratum thread create failed");
+			return 1;
+		}
+
+		if (have_stratum)
+			tq_push(thr_info[stratum_thr_id].q, strdup(rpc_url));
+	}
+
 
 	/* start mining threads */
 	for (i = 0; i < opt_n_threads; i++) {

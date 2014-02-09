@@ -4,7 +4,7 @@
 	Public Domain or MIT License, whichever is easier
 */
 
-#include "cpuminer-config.h"
+#include "allminer-config.h"
 #include "miner.h"
 
 #include <string.h>
@@ -30,7 +30,12 @@
 #define scrypt_maxp 25  /* (1 << 25) = ~33 million */
 
 #include <stdio.h>
+
+#ifdef MAC_BUILD
+#include <malloc/malloc.h>
+#else
 #include <malloc.h>
+#endif
 
 static void
 scrypt_fatal_error_default(const char *msg) {

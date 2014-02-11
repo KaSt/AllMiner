@@ -59,12 +59,14 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+#ifndef ANDROID_SDK
 	cpu_set_t set;
 
 	CPU_ZERO(&set);
 	CPU_SET(cpu, &set);
 	sched_setaffinity(0, sizeof(&set), &set);
 	applog(LOG_INFO, "Binding thread %d to cpu %d", id, cpu);
+#endif
 }
 #else
 static inline void drop_policy(void)
@@ -73,11 +75,13 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+#ifndef ANDROID_SDK
 	cpu_set_t set;
 
 	CPU_ZERO(&set);
 	CPU_SET(cpu, &set);
 	sched_setaffinity(0, sizeof(&set), &set);
+#endif
 }
 #endif
 		

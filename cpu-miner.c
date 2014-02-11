@@ -101,6 +101,7 @@ enum sha256_algos {
 	ALGO_QUARK,             /* QUARKCOIN algo */
 	ALGO_KECCAK,		/* KECCAK algo */
 	ALGO_QUBIT,		/*QUBITCOIN ALGO */
+	ALGO_SKEIN,		/* Skein */
 };
 
 static const char *algo_names[] = {
@@ -110,6 +111,7 @@ static const char *algo_names[] = {
 	[ALGO_QUARK]		= "quark",
 	[ALGO_KECCAK]		= "keccak",
 	[ALGO_QUBIT]		= "qubit",
+	[ALGO_SKEIN]		= "skein",
 };
 
 bool opt_debug = false;
@@ -174,6 +176,7 @@ Options:\n\
 			  quark     Quarkcoin\n\
 			  keccak    Keccak SHA3 (MaxCoin)\n\
  	 		  qubit     QubitCoin\n\
+                          skein     Skein+Sha256\n\
   -o, --url=URL         URL of mining server (default: " DEF_RPC_URL ")\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
@@ -789,6 +792,11 @@ static void *miner_thread(void *userdata)
 			rc = scanhash_qubit(thr_id, work.data, work.target,
 						max_nonce, &hashes_done);
 			break;
+		case ALGO_SKEIN:
+			rc = scanhash_skein(thr_id, work.data, work.target,
+						max_nonce, &hashes_done);
+			break;
+
 		default:
 			/* should never happen */
 			goto out;

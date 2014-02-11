@@ -18,7 +18,7 @@ allminer_SOURCES	= elist.h miner.h compat.h \
 		  scrypt.c scrypt-arm.S scrypt-x86.S scrypt-x64.S scrypt-jane.c \
 		  keccak.c maxcoin.c blake.c bmw.c groestl.c jh.c skein.c quark.c \
    	        aes_helper.c cubehash.c luffa.c shavite.c simd.c echo.c qubit.c \
-		skeincoin.c
+		skeincoin.c Xcoin.c
 		
 allminer_LDFLAGS	= $(PTHREAD_FLAGS)
 allminer_LDADD	= @LIBCURL@ @JANSSON_LIBS@ @PTHREAD_LIBS@ @WS2_LIBS@

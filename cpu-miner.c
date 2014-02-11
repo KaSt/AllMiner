@@ -102,6 +102,7 @@ enum sha256_algos {
 	ALGO_KECCAK,		/* KECCAK algo */
 	ALGO_QUBIT,		/*QUBITCOIN ALGO */
 	ALGO_SKEIN,		/* Skein */
+	ALGO_X,			   /*XCOIN ALGO */ 
 };
 
 static const char *algo_names[] = {
@@ -112,6 +113,7 @@ static const char *algo_names[] = {
 	[ALGO_KECCAK]		= "keccak",
 	[ALGO_QUBIT]		= "qubit",
 	[ALGO_SKEIN]		= "skein",
+	[ALGO_X]			= "X11",
 };
 
 bool opt_debug = false;
@@ -177,6 +179,7 @@ Options:\n\
 			  keccak    Keccak SHA3 (MaxCoin)\n\
  	 		  qubit     QubitCoin\n\
                           skein     Skein+Sha256\n\
+			  X11       Xcoin\n\
   -o, --url=URL         URL of mining server (default: " DEF_RPC_URL ")\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
@@ -796,6 +799,10 @@ static void *miner_thread(void *userdata)
 			rc = scanhash_skein(thr_id, work.data, work.target,
 						max_nonce, &hashes_done);
 			break;
+		case ALGO_X:
+			rc = scanhash_X(thr_id, work.data, work.target,
+						max_nonce, &hashes_done);
+			break;
 
 		default:
 			/* should never happen */
@@ -1287,6 +1294,10 @@ int main(int argc, char *argv[])
 
 	if (opt_algo==ALGO_QUBIT) {
 		init_qubithash_contexts();
+	}
+	
+	if (opt_algo==ALGO_X) {
+		init_Xhash_contexts();
 	}
 
 #ifndef WIN32

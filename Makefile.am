@@ -16,7 +16,8 @@ allminer_SOURCES	= elist.h miner.h compat.h \
 		  cpu-miner.c util.c \
 		  sha2.c sha2-arm.S sha2-x86.S sha2-x64.S \
 		  scrypt.c scrypt-arm.S scrypt-x86.S scrypt-x64.S scrypt-jane.c \
-		  keccak.c maxcoin.c blake.c bmw.c groestl.c jh.c skein.c quark.c
+		  keccak.c maxcoin.c blake.c bmw.c groestl.c jh.c skein.c quark.c \
+   	       	aes_helper.c cubehash.c luffa.c shavite.c simd.c echo.c qubit.c
 allminer_LDFLAGS	= $(PTHREAD_FLAGS)
 allminer_LDADD	= @LIBCURL@ @JANSSON_LIBS@ @PTHREAD_LIBS@ @WS2_LIBS@
 allminer_CPPFLAGS = @LIBCURL_CPPFLAGS@ -DSCRYPT_KECCAK512 -DSCRYPT_CHACHA -DSCRYPT_CHOOSE_COMPILETIME

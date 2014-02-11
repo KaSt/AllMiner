@@ -100,6 +100,7 @@ enum sha256_algos {
 	ALGO_SHA256D,		/* SHA-256d */
 	ALGO_QUARK,             /* QUARKCOIN algo */
 	ALGO_KECCAK,		/* KECCAK algo */
+	ALGO_QUBIT,		/*QUBITCOIN ALGO */
 };
 
 static const char *algo_names[] = {
@@ -108,6 +109,7 @@ static const char *algo_names[] = {
 	[ALGO_SHA256D]		= "sha256d",
 	[ALGO_QUARK]		= "quark",
 	[ALGO_KECCAK]		= "keccak",
+	[ALGO_QUBIT]		= "qubit",
 };
 
 bool opt_debug = false;
@@ -171,6 +173,7 @@ Options:\n\
                           sha256d      SHA-256d\n\
 			  quark     Quarkcoin\n\
 			  keccak    Keccak SHA3 (MaxCoin)\n\
+ 	 		  qubit     QubitCoin\n\
   -o, --url=URL         URL of mining server (default: " DEF_RPC_URL ")\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
@@ -780,7 +783,11 @@ static void *miner_thread(void *userdata)
 			break;
 		case ALGO_KECCAK:
 			rc = scanhash_keccak(thr_id, work.data, work.target,
-			max_nonce, &hashes_done);
+						max_nonce, &hashes_done);
+			break;
+		case ALGO_QUBIT:
+			rc = scanhash_qubit(thr_id, work.data, work.target,
+						max_nonce, &hashes_done);
 			break;
 		default:
 			/* should never happen */
@@ -1268,6 +1275,10 @@ int main(int argc, char *argv[])
 
 	if (opt_algo==ALGO_QUARK) {
 		init_quarkhash_contexts();
+	}
+
+	if (opt_algo==ALGO_QUBIT) {
+		init_qubithash_contexts();
 	}
 
 #ifndef WIN32
